@@ -124,12 +124,30 @@ class MySQLDriver(coordination.CoordinationDriver):
     def _start(self):
         self._conn = MySQLDriver.get_connection(self._parsed_url,
                                                 self._options)
+        self.check_db(self)
 
     def _stop(self):
         self._conn.close()
 
     def get_lock(self, name):
         return MySQLLock(name, self._parsed_url, self._options)
+
+    def check_db(self):
+        try:
+            with self._conn as cur:
+                cur.execute("SHOW TABLES LIKE 'tooz_locks'")
+                if cur.fetchall().len() is 0:
+                    cur.execute("""CREATE TABLE 'tooz_locks' (
+                                   'name' varchar(255) NOT NULL DEFAULT '',
+                                   'created_at' timestamp NOT NULL DEFAULT '0000-00-00 00:00:00',
+                                   'updated_at' timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                                   'created_by' varchar(255) NOT NULL DEFAULT '',
+                                   PRIMARY KEY (`name`)
+                                   ) ENGINE=InnoDB DEFAULT CHARSET=utf8;""")
+        except pymysql.MySQLError as e:
+            coordination.raise_with_cause(coordination.ToozError,
+                                          encodeutils.exception_to_unicode(e),
+                                          cause=e)
 
     @staticmethod
     def watch_join_group(group_id, callback):
