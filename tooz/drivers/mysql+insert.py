@@ -41,15 +41,6 @@ class MySQLLock(locking.Lock):
 
         @_retry.retry(stop_max_delay=blocking)
         def _lock():
-            # NOTE(sileht): mysql-server (<5.7.5) allows only one lock per
-            # connection at a time:
-            #  select GET_LOCK("a", 0);
-            #  select GET_LOCK("b", 0); <-- this release lock "a" ...
-            # Or
-            #  select GET_LOCK("a", 0);
-            #  select GET_LOCK("a", 0); release and lock again "a"
-            #
-            # So, we track locally the lock status with self.acquired
             if self.acquired is True:
                 if blocking:
                     raise _retry.Retry
