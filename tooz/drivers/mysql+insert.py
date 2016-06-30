@@ -32,7 +32,7 @@ class MySQLLock(locking.Lock):
 
     MYSQL_DEFAULT_PORT = 3306
 
-    def __init__(self, name, parsed_url, options):
+    def __init__(self, member_id, name, parsed_url, options):
         super(MySQLLock, self).__init__(name)
         self.acquired = False
         self._conn = MySQLDriver.get_connection(parsed_url, options)
@@ -57,11 +57,13 @@ class MySQLLock(locking.Lock):
 
             try:
                 with self._conn as cur:
-                    cur.execute("SELECT GET_LOCK(%s, 0);", self.name)
-                    # Can return NULL on error
-                    if cur.fetchone()[0] is 1:
-                        self.acquired = True
-                        return True
+                    cur.execute("""INSERT INTO 'tooz_locks'
+                                ('name', 'created_at', 'created_by')
+                                values ('%s', CURRENT_TIMESTAMP, '%s');
+                                """ % (self.name, self.member_id))
+                    cur.fetchone()
+                    self.acquired = True
+                    return True
             except pymysql.MySQLError as e:
                 coordination.raise_with_cause(
                     coordination.ToozError,
@@ -79,7 +81,10 @@ class MySQLLock(locking.Lock):
             return False
         try:
             with self._conn as cur:
-                cur.execute("SELECT RELEASE_LOCK(%s);", self.name)
+                cur.execute("""DELETE FROM 'tooz_locks'
+                            WHERE 'name' = '%s'
+                            AND 'created_by' = '%s';
+                            """ % (self.name, self.member_id))
                 cur.fetchone()
                 self.acquired = False
                 return True
@@ -120,17 +125,18 @@ class MySQLDriver(coordination.CoordinationDriver):
         super(MySQLDriver, self).__init__()
         self._parsed_url = parsed_url
         self._options = utils.collapse(options)
+        self.member_id = member_id
 
     def _start(self):
         self._conn = MySQLDriver.get_connection(self._parsed_url,
                                                 self._options)
-        self.check_db(self)
+        self.check_db()
 
     def _stop(self):
         self._conn.close()
 
     def get_lock(self, name):
-        return MySQLLock(name, self._parsed_url, self._options)
+        return MySQLLock(name, self.member_id, self._parsed_url, self._options)
 
     def check_db(self):
         try:
@@ -139,11 +145,14 @@ class MySQLDriver(coordination.CoordinationDriver):
                 if cur.fetchall().len() is 0:
                     cur.execute("""CREATE TABLE 'tooz_locks' (
                                    'name' varchar(255) NOT NULL DEFAULT '',
-                                   'created_at' timestamp NOT NULL DEFAULT '0000-00-00 00:00:00',
-                                   'updated_at' timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                                   'created_at' timestamp NOT NULL
+                                   DEFAULT '0000-00-00 00:00:00',
+                                   'updated_at' timestamp NOT NULL
+                                   DEFAULT CURRENT_TIMESTAMP
+                                   ON UPDATE CURRENT_TIMESTAMP,
                                    'created_by' varchar(255) NOT NULL DEFAULT '',
-                                   PRIMARY KEY (`name`)
-                                   ) ENGINE=InnoDB DEFAULT CHARSET=utf8;""")
+                                   PRIMARY KEY ('name'))
+                                   ENGINE=InnoDB DEFAULT CHARSET=utf8;""")
         except pymysql.MySQLError as e:
             coordination.raise_with_cause(coordination.ToozError,
                                           encodeutils.exception_to_unicode(e),
