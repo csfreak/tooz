@@ -57,15 +57,14 @@ class MySQLLock(locking.Lock):
                     return True
             except pymysql.ProgrammingError as e:
                 try:
-                    cur.execute("""CREATE TABLE 'tooz_locks' (
-                                   'name' varchar(255) NOT NULL DEFAULT '',
-                                   'created_at' timestamp NOT NULL
-                                   DEFAULT '0000-00-00 00:00:00',
-                                   'updated_at' timestamp NOT NULL
+                    cur.execute("""CREATE TABLE `tooz_locks` (
+                                   `name` varchar(255) NOT NULL,
+                                   `created_at` timestamp NOT NULL,
+                                   `updated_at` timestamp NOT NULL
                                    DEFAULT CURRENT_TIMESTAMP
                                    ON UPDATE CURRENT_TIMESTAMP,
-                                   'created_by' varchar(255) NOT NULL DEFAULT ''
-                                   , PRIMARY KEY ('name'))
+                                   `created_by` varchar(255) NOT NULL,
+                                   PRIMARY KEY ('name'))
                                    ENGINE=InnoDB DEFAULT CHARSET=utf8;""")
                     cur.commit()
                     raise _retry.Retry                    
@@ -149,11 +148,12 @@ class MySQLDriver(coordination.CoordinationDriver):
                                                 self._options)
 
     def _stop(self):
-        with self._conn as cur:
-                cur.execute("""DELETE FROM `tooz_locks`
-                            `created_by` = %s;
-                            """ % (self.member_id))
-                cur.commit()
+# Commenting this block for further research.
+#        with self._conn as cur:
+#                cur.execute("""DELETE FROM `tooz_locks`
+#                            `created_by` = %s;
+#                            """ % (self.member_id))
+#                cur.commit()
         self._conn.close()
 
     def get_lock(self, name):
