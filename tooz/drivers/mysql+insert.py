@@ -95,6 +95,7 @@ class MySQLLock(locking.Lock):
 
     def __del__(self):
         if self.acquired:
+            self.release()
             LOG.warning("unreleased lock %s garbage collected", self.name)
 
 
