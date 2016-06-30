@@ -48,11 +48,11 @@ class MySQLLock(locking.Lock):
 
             try:
                 with self._conn as cur:
-                    cur.execute("""INSERT INTO 'tooz_locks'
-                                ('name', 'created_at', 'created_by')
-                                values ('%s', CURRENT_TIMESTAMP, '%s');
+                    cur.execute("""INSERT INTO `tooz_locks`
+                                (`name`, `created_at`, `created_by`)
+                                values (%s, CURRENT_TIMESTAMP, %s);
                                 """ % (self.name, self.member_id))
-                    cur.fetchone()
+                    cur.commit()
                     self.acquired = True
                     return True
             except pymysql.MySQLError as e:
@@ -72,11 +72,11 @@ class MySQLLock(locking.Lock):
             return False
         try:
             with self._conn as cur:
-                cur.execute("""DELETE FROM 'tooz_locks'
-                            WHERE 'name' = '%s'
-                            AND 'created_by' = '%s';
+                cur.execute("""DELETE FROM `tooz_locks`
+                            WHERE `name` = %s
+                            AND `created_by` = %s;
                             """ % (self.name, self.member_id))
-                cur.fetchone()
+                cur.commit()
                 self.acquired = False
                 return True
         except pymysql.MySQLError as e:
