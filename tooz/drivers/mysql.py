@@ -32,36 +32,53 @@ class MySQLLock(locking.Lock):
 
     MYSQL_DEFAULT_PORT = 3306
 
-    def __init__(self, name, parsed_url, options):
+    def __init__(self, name, coord):
         super(MySQLLock, self).__init__(name)
-        self.acquired = False
-        self._conn = MySQLDriver.get_connection(parsed_url, options)
+        self.coord = coord
 
     def acquire(self, blocking=True):
 
         @_retry.retry(stop_max_delay=blocking)
         def _lock():
-            # NOTE(sileht): mysql-server (<5.7.5) allows only one lock per
-            # connection at a time:
-            #  select GET_LOCK("a", 0);
-            #  select GET_LOCK("b", 0); <-- this release lock "a" ...
-            # Or
-            #  select GET_LOCK("a", 0);
-            #  select GET_LOCK("a", 0); release and lock again "a"
-            #
-            # So, we track locally the lock status with self.acquired
             if self.acquired is True:
                 if blocking:
                     raise _retry.Retry
                 return False
 
             try:
-                with self._conn as cur:
-                    cur.execute("SELECT GET_LOCK(%s, 0);", self.name)
-                    # Can return NULL on error
-                    if cur.fetchone()[0] is 1:
-                        self.acquired = True
-                        return True
+                with self.coord._conn as cur:
+                    cur.execute("""INSERT INTO `tooz_locks`
+                                (`name`, `created_at`, `created_by`)
+                                values ('%s', CURRENT_TIMESTAMP, '%s');
+                                """ % (str(self.name), str(self.coord._member_id)))
+                    self.coord._acquired_locks.append(self)
+                    return True
+            except pymysql.ProgrammingError as e:
+                try:
+                    cur.execute("""CREATE TABLE `tooz_locks` (
+				`name` varchar(255) NOT NULL
+				DEFAULT '',
+				`created_at` timestamp NOT NULL
+				DEFAULT '0000-00-00 00:00:00',
+				`updated_at` timestamp NOT NULL
+				DEFAULT CURRENT_TIMESTAMP
+				ON UPDATE CURRENT_TIMESTAMP,
+				`created_by` varchar(255) NOT NULL
+				DEFAULT '',
+				PRIMARY KEY (`name`))
+				ENGINE=InnoDB DEFAULT CHARSET=utf8;""")
+                    raise _retry.Retry                    
+                except pymysql.MySQLError as e:
+                    coordination.raise_with_cause(
+                        coordination.ToozError,
+                        encodeutils.exception_to_unicode(e),
+                        cause=e)
+            except pymysql.IntegrityError as e:
+                coordination.raise_with_cause(
+                    coordination.LockAcquireFailed,
+                    encodeutile.exception_to_unicode(e),
+                    cause=e)
+                
             except pymysql.MySQLError as e:
                 coordination.raise_with_cause(
                     coordination.ToozError,
@@ -78,20 +95,36 @@ class MySQLLock(locking.Lock):
         if not self.acquired:
             return False
         try:
-            with self._conn as cur:
-                cur.execute("SELECT RELEASE_LOCK(%s);", self.name)
-                cur.fetchone()
-                self.acquired = False
+            with self.coord._conn as cur:
+                cur.execute("""DELETE FROM `tooz_locks`
+                            WHERE `name` = '%s'
+                            AND `created_by` = '%s';
+                            """ % (str(self.name), str(self.coord._member_id)))
+                self.coord._acquired_locks.remove(self)
                 return True
         except pymysql.MySQLError as e:
             coordination.raise_with_cause(coordination.ToozError,
                                           encodeutils.exception_to_unicode(e),
                                           cause=e)
 
+    def heartbeat(self):
+        if self.aquired:
+            try:
+                with self.coord._conn as cur:
+                    cur.execute("""UPDATE `tooz_locks`
+                                WHERE `name` = %s
+                                AND `created_by` = %s;
+                                """ % (self.name, self.coord._member_id))
+            except pymysql.MySQLError:
+                LOG.warning("Unable to update lock")
     def __del__(self):
         if self.acquired:
+            self.release()
             LOG.warning("unreleased lock %s garbage collected", self.name)
 
+    @property
+    def acquired(self):
+        return self in self.coord._acquired_locks
 
 class MySQLDriver(coordination.CoordinationDriver):
     """A `MySQL`_ based driver.
@@ -105,7 +138,6 @@ class MySQLDriver(coordination.CoordinationDriver):
     """
 
     CHARACTERISTICS = (
-        coordination.Characteristics.NON_TIMEOUT_BASED,
         coordination.Characteristics.DISTRIBUTED_ACROSS_THREADS,
         coordination.Characteristics.DISTRIBUTED_ACROSS_PROCESSES,
         coordination.Characteristics.DISTRIBUTED_ACROSS_HOSTS,
@@ -120,16 +152,30 @@ class MySQLDriver(coordination.CoordinationDriver):
         super(MySQLDriver, self).__init__()
         self._parsed_url = parsed_url
         self._options = utils.collapse(options)
+        self._member_id = member_id
+        self._acquired_locks = []
 
     def _start(self):
         self._conn = MySQLDriver.get_connection(self._parsed_url,
                                                 self._options)
 
     def _stop(self):
+        for _lock in self._acquired_locks:
+            try:
+                _lock.release()
+            except:
+                continue
         self._conn.close()
 
+    def heartbeat(self):
+        for _lock in self._acquired_locks:
+            try:
+                _lock.heartbeat()
+            except:
+                continue
+
     def get_lock(self, name):
-        return MySQLLock(name, self._parsed_url, self._options)
+        return MySQLLock(name, self)
 
     @staticmethod
     def watch_join_group(group_id, callback):
@@ -170,14 +216,17 @@ class MySQLDriver(coordination.CoordinationDriver):
                                        port=port,
                                        user=username,
                                        passwd=password,
-                                       database=dbname)
+                                       database=dbname,
+                                       autocommit=True)
             else:
                 return pymysql.Connect(host=host,
                                        port=port,
                                        user=username,
                                        passwd=password,
-                                       database=dbname)
+                                       database=dbname,
+                                       autocommit=True)
         except (pymysql.err.OperationalError, pymysql.err.InternalError) as e:
             coordination.raise_with_cause(coordination.ToozConnectionError,
                                           encodeutils.exception_to_unicode(e),
                                           cause=e)
+
