@@ -35,6 +35,7 @@ class MySQLLock(locking.Lock):
     def __init__(self, name, coord):
         super(MySQLLock, self).__init__(name)
         self.coord = coord
+        self._conn = MySQLDriver.get_connection(self.coord._parsed_url, self.coord._options)
 
     def acquire(self, blocking=True):
 
@@ -46,7 +47,7 @@ class MySQLLock(locking.Lock):
                 return False
 
             try:
-                with self.coord._conn as cur:
+                with self._conn as cur:
                     cur.execute("""INSERT INTO `tooz_locks`
                                 (`name`, `created_at`, `created_by`)
                                 values ('%s', CURRENT_TIMESTAMP, '%s');
@@ -76,14 +77,18 @@ class MySQLLock(locking.Lock):
             except pymysql.IntegrityError as e:
                 coordination.raise_with_cause(
                     coordination.LockAcquireFailed,
-                    encodeutile.exception_to_unicode(e),
+                    encodeutils.exception_to_unicode(e),
                     cause=e)
                 
             except pymysql.MySQLError as e:
-                coordination.raise_with_cause(
-                    coordination.ToozError,
-                    encodeutils.exception_to_unicode(e),
-                    cause=e)
+                try:
+                    self._conn.connect()
+                    raise _retry.Retry
+                except pymysql.MySQLError as e:
+                    coordination.raise_with_cause(
+                        coordination.ToozError,
+                        encodeutils.exception_to_unicode(e),
+                        cause=e)
 
             if blocking:
                 raise _retry.Retry
@@ -95,7 +100,7 @@ class MySQLLock(locking.Lock):
         if not self.acquired:
             return False
         try:
-            with self.coord._conn as cur:
+            with self._conn as cur:
                 cur.execute("""DELETE FROM `tooz_locks`
                             WHERE `name` = '%s'
                             AND `created_by` = '%s';
@@ -103,9 +108,14 @@ class MySQLLock(locking.Lock):
                 self.coord._acquired_locks.remove(self)
                 return True
         except pymysql.MySQLError as e:
-            coordination.raise_with_cause(coordination.ToozError,
-                                          encodeutils.exception_to_unicode(e),
-                                          cause=e)
+            try:
+                self._conn.connect()
+                raise _retry.Retry
+            except pymysql.MySQLError as e:
+                coordination.raise_with_cause(
+                    coordination.ToozError,
+                    encodeutils.exception_to_unicode(e),
+                    cause=e)
 
     def heartbeat(self):
         if self.aquired:
@@ -116,7 +126,14 @@ class MySQLLock(locking.Lock):
                                 AND `created_by` = %s;
                                 """ % (self.name, self.coord._member_id))
             except pymysql.MySQLError:
-                LOG.warning("Unable to update lock")
+                try:
+                    self._conn.connect()
+                    raise _retry.Retry
+                except pymysql.MySQLError as e:
+                    coordination.raise_with_cause(
+                        coordination.ToozError,
+                        encodeutils.exception_to_unicode(e),
+                        cause=e)
     def __del__(self):
         if self.acquired:
             self.release()
